@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ClassGroup, Worksheet, Student, AnswerSubmission, EvaluationReport } from '../types';
 import { SvgLibraryResolver } from './SvgLibraryResolver';
 import { WorksheetIframeModal } from './WorksheetIframeModal';
+import { ReasoningSection } from './EducationalReasoning';
 
 interface WorksheetWorkflowProps {
   classGroup: ClassGroup;
@@ -515,6 +516,12 @@ export const WorksheetWorkflow: React.FC<WorksheetWorkflowProps> = ({ classGroup
                   <span className="text-[9px] font-mono font-bold uppercase text-zinc-400">AI Narrative Summary</span>
                   <p className="text-zinc-600 text-xs leading-relaxed">{evaluationResult.report.narrative}</p>
                 </div>
+
+                {/* Phase 1: Educational Reasoning */}
+                <ReasoningSection
+                  report={evaluationResult.report}
+                  title="Educational Reasoning — Learning Progression"
+                />
               </div>
             )}
           </div>

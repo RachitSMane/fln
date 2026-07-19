@@ -113,6 +113,75 @@ export interface AnswerSubmission {
   answers: { [questionId: string]: string };
 }
 
+export type ConfidenceLevel = 'Very High' | 'High' | 'Moderate' | 'Low';
+
+export interface EvaluationReasoning {
+  explanation: {
+    headline: string;
+    narrative: string;
+  };
+  conceptMastery: { [topic: string]: 'Strong' | 'Needs Practice' | 'Satisfactory' };
+  // Phase 4: placement confidence. Deterministic; derived from existing
+  // evaluation signals (upstream pipeline confidence_score when available,
+  // otherwise raw accuracy).
+  confidence?: {
+    score: number;
+    level: ConfidenceLevel;
+    explanation: string;
+  };
+  learningProgression: {
+    currentLevel: number;
+    currentLevelName: string;
+    currentStrand: string;
+    nextMilestone: { level: number; name: string; strand: string } | null;
+    blockers: { topic: string; questionId?: string; errorType?: string }[];
+    recommendations: string[];
+  };
+  // Phase 2: evidence-driven fields.
+  evidence?: {
+    assessedTopics: string[];
+    strongestConcepts: string[];
+    weakestConcepts: string[];
+    failedQuestionSummary: {
+      total: number;
+      byLevel: { level: number; name: string | null; count: number; pipelineReported?: boolean }[];
+      byTopic: { topic: string; count: number }[];
+    };
+    difficultyBreakdown?: {
+      easy: { correct: number; attempted: number };
+      medium: { correct: number; attempted: number };
+      hard: { correct: number; attempted: number };
+    };
+    conceptMastery: { [topic: string]: 'Strong' | 'Needs Practice' | 'Satisfactory' };
+  };
+  remediation?: {
+    reusedFailedQuestions: number;
+    newlyIntroducedCurriculum: number;
+    remediationReason: string;
+    targetClass: number | null;
+    targetPhrase: string | null;
+  };
+  // Phase 3: curriculum-aware teaching summary. All content comes from
+  // the existing FLN Levels Structure (loaded by the backend curriculum
+  // loader); the frontend never invents or duplicates curriculum data.
+  curriculumSummary?: {
+    currentLevelName: string;
+    currentObjective: string;
+    currentLearningOutcome: string[];
+    currentTopics: string[];
+    nextLevelName: string | null;
+    nextObjective: string | null;
+    transitionReason: string;
+  };
+  personalized?: {
+    failedQuestionsReused: number;
+    newLevelQuestionsAdded: number;
+    targetPhrase: string | null;
+    targetClass: number | null;
+    rationale: string;
+  };
+}
+
 export interface EvaluationReport {
   id: string;
   studentId: string;
@@ -124,6 +193,8 @@ export interface EvaluationReport {
   recommendedLevel: number;
   recommendedSubLevel?: number;
   timestamp: string;
+  // Phase 1: structured reasoning — falls back to `narrative` when absent.
+  reasoning?: EvaluationReasoning;
 }
 
 export interface Ticket {

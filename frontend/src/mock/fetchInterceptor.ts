@@ -1,6 +1,7 @@
 import { loadMockDB, saveMockDB, getInitialSeedData, MockDatabaseSchema } from './dbStore';
 import { generateQuestionsForLevel } from '../utils/levelGenerator';
-import { UserRole, Student, Worksheet, AnswerSubmission, EvaluationReport, Ticket, LogEntry, Announcement, Question } from '../types';
+import { FLN_LEVELS_LIST } from '../components/RoleDashboards';
+import { UserRole, Student, Worksheet, AnswerSubmission, EvaluationReport, Ticket, LogEntry, Announcement, Question, EvaluationReasoning } from '../types';
 
 // Deterministic mock grading for Diagnostic
 function evaluateDiagnosticMock(
@@ -56,6 +57,183 @@ REMEDIAL RECOMMENDATIONS:
     score,
     recommendedLevel,
     narrative
+  };
+}
+
+// Phase 1: mock-side reasoning builder. Mirrors backend/src/reasoning.ts so the
+// UI shows the structured "Educational Reasoning" section in the running app
+// (which still answers API calls via this interceptor — see CLAUDE.md).
+function buildMockReasoning(
+  studentName: string,
+  score: number,
+  totalQuestions: number,
+  recommendedLevel: number,
+  recommendedSubLevel: number | undefined,
+  questions: any[],
+  answers: { [key: string]: string }
+): EvaluationReasoning {
+  const FLN_INDEX: Record<number, { name: string; strand: string; class: string }> = {};
+  for (const l of FLN_LEVELS_LIST) FLN_INDEX[l.id] = l;
+  const MAX = 59;
+
+  const current = FLN_INDEX[recommendedLevel] || { name: `Level ${recommendedLevel}`, strand: 'Number Sense', class: '' };
+  const nextLevel = recommendedLevel < MAX ? recommendedLevel + 1 : null;
+  const next = nextLevel ? FLN_INDEX[nextLevel] : null;
+
+  const failedByLevel = new Map<number, any[]>();
+  for (const q of questions) {
+    const submitted = (answers[q.question_id] || '').trim().toLowerCase();
+    const correct = (q.answer || '').trim().toLowerCase();
+    if (submitted !== correct) {
+      const lvl = q.source_level;
+      if (!Number.isFinite(lvl) || lvl < 1) continue;
+      const arr = failedByLevel.get(lvl) || [];
+      arr.push(q);
+      failedByLevel.set(lvl, arr);
+    }
+  }
+
+  const sortedLevels = Array.from(failedByLevel.keys()).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+  const masteryPct = totalQuestions > 0 ? Math.round((score / totalQuestions) * 100) : 0;
+  const sub = recommendedSubLevel ?? 0;
+  const subLabel = sub === 0 ? 'mastery' : sub === 1 ? 'easier (partial mastery)' : 'remedial (re-teach)';
+
+  const headline =
+    masteryPct >= 90
+      ? `Strong performance across the FLN framework — placed at ${current.name}.`
+      : masteryPct >= 60
+        ? `Solid foundation with focused practice needed — placed at ${current.name}.`
+        : `Foundational gaps identified at Level ${recommendedLevel} (${current.name}) — remediation recommended before progressing.`;
+
+  const narrativeParts = [
+    `${studentName} scored ${score} / ${totalQuestions} (${masteryPct}%). ` +
+      `Based on the existing FLN framework, ${studentName} is placed at Level ${recommendedLevel} (${current.name}), sub-level ${sub} (${subLabel}).`,
+  ];
+  if (sortedLevels.length > 0) {
+    const summary = sortedLevels.slice(0, 5).map((l) => {
+      const desc = FLN_INDEX[l];
+      const count = (failedByLevel.get(l) || []).length;
+      return `L${l}${desc ? ` (${desc.name})` : ''}: ${count}`;
+    }).join(', ');
+    narrativeParts.push(
+      `Failures cluster around ${summary}. The "Minimum Failure Level" rule places the student at the lowest failing level, since higher levels depend on these foundations.`
+    );
+  } else {
+    narrativeParts.push('No wrong answers recorded at the tested levels — placement reflects the highest demonstrated level.');
+  }
+
+  const blockers: EvaluationReasoning['learningProgression']['blockers'] = [];
+  for (const lvl of sortedLevels) {
+    const seen = new Set<string>();
+    for (const q of failedByLevel.get(lvl) || []) {
+      const topic = q.topic || 'General Mathematics';
+      if (!seen.has(topic)) {
+        seen.add(topic);
+        blockers.push({ topic, questionId: q.question_id });
+      }
+    }
+  }
+
+  const recommendations: string[] = [];
+  if (sortedLevels.length > 0) {
+    const minLevel = sortedLevels[0];
+    const minDesc = FLN_INDEX[minLevel];
+    if (minDesc) recommendations.push(`Start remediation at Level ${minLevel} (${minDesc.name}) in the strand: ${minDesc.strand}.`);
+    for (const lvl of sortedLevels.slice(0, 3)) {
+      const desc = FLN_INDEX[lvl];
+      if (desc) recommendations.push(`Practice Level ${lvl} — ${desc.name}.`);
+    }
+  } else {
+    recommendations.push('Continue regular practice at the placed level to consolidate fluency.');
+  }
+  if (next) recommendations.push(`Target the next curriculum milestone: Level ${nextLevel} (${next.name}).`);
+  else recommendations.push(`The placed level is the highest in the framework (Level ${MAX}); focus on mastery consolidation.`);
+
+  // Phase 2: evidence (derived from questions+answers; no AI pipeline output in mock).
+  const topicTotals = new Map<string, { correct: number; attempted: number }>();
+  const levelFailures = new Map<number, number>();
+  const difficultyMap: { easy: { correct: number; attempted: number }; medium: { correct: number; attempted: number }; hard: { correct: number; attempted: number } } = {
+    easy: { correct: 0, attempted: 0 },
+    medium: { correct: 0, attempted: 0 },
+    hard: { correct: 0, attempted: 0 },
+  };
+  let totalFailed = 0;
+  for (const q of questions) {
+    const submitted = (answers[q.question_id] || '').trim().toLowerCase();
+    const correct = (q.answer || '').trim().toLowerCase();
+    const isCorrect = submitted === correct;
+    const topic = q.topic || 'General Mathematics';
+    const t = topicTotals.get(topic) || { correct: 0, attempted: 0 };
+    t.attempted += 1;
+    if (isCorrect) t.correct += 1;
+    topicTotals.set(topic, t);
+    if (!isCorrect) {
+      totalFailed += 1;
+      const lvl = q.source_level;
+      if (Number.isFinite(lvl) && lvl >= 1) {
+        levelFailures.set(lvl, (levelFailures.get(lvl) || 0) + 1);
+      }
+    }
+    const d = (q.difficulty || '').toLowerCase();
+    if (d === 'easy' || d === 'medium' || d === 'hard') {
+      difficultyMap[d].attempted += 1;
+      if (isCorrect) difficultyMap[d].correct += 1;
+    }
+  }
+  const strongestConcepts: string[] = [];
+  const weakestConcepts: string[] = [];
+  const conceptMastery: { [topic: string]: 'Strong' | 'Needs Practice' | 'Satisfactory' } = {};
+  for (const [topic, agg] of topicTotals.entries()) {
+    if (agg.attempted > 0 && agg.correct === agg.attempted) strongestConcepts.push(topic);
+    if (agg.correct < agg.attempted) weakestConcepts.push(topic);
+    if (agg.attempted > 0) {
+      conceptMastery[topic] = agg.correct === agg.attempted
+        ? 'Strong'
+        : agg.correct === 0
+        ? 'Needs Practice'
+        : 'Satisfactory';
+    }
+  }
+  strongestConcepts.sort();
+  weakestConcepts.sort();
+
+  const byLevel = Array.from(levelFailures.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([level, count]) => ({
+      level,
+      name: FLN_INDEX[level]?.name ?? null,
+      count,
+    }));
+  const byTopic = Array.from(topicTotals.entries())
+    .filter(([, agg]) => agg.correct < agg.attempted)
+    .map(([topic, agg]) => ({ topic, count: agg.attempted - agg.correct }))
+    .sort((a, b) => b.count - a.count);
+
+  const evidence: EvaluationReasoning['evidence'] = {
+    assessedTopics: Array.from(new Set(questions.map((q) => q.topic || 'General Mathematics'))).sort(),
+    strongestConcepts,
+    weakestConcepts,
+    failedQuestionSummary: {
+      total: totalFailed,
+      byLevel,
+      byTopic,
+    },
+    difficultyBreakdown: difficultyMap,
+    conceptMastery,
+  };
+
+  return {
+    explanation: { headline, narrative: narrativeParts.join(' ') },
+    conceptMastery,
+    learningProgression: {
+      currentLevel: recommendedLevel,
+      currentLevelName: current.name,
+      currentStrand: current.strand,
+      nextMilestone: next && nextLevel ? { level: nextLevel, name: next.name, strand: next.strand } : null,
+      blockers,
+      recommendations,
+    },
+    evidence,
   };
 }
 
@@ -481,6 +659,16 @@ export function setupFetchInterceptor() {
         student.targetLevel = Math.min(59, evaluation.recommendedLevel + 1);
         student.levelHistory = newHistory;
 
+        const reasoning = buildMockReasoning(
+          student.name,
+          evaluation.score,
+          questions.length,
+          evaluation.recommendedLevel,
+          subLevel,
+          questions,
+          answers
+        );
+
         // Add Evaluation Report
         const report: EvaluationReport = {
           id: 'rep_diag_' + Date.now(),
@@ -488,15 +676,12 @@ export function setupFetchInterceptor() {
           worksheetId: 'diagnostic',
           score: evaluation.score,
           totalQuestions: questions.length,
-          conceptMastery: {
-            'Number Sense': evaluation.recommendedLevel >= 2 ? 'Strong' : 'Needs Practice',
-            'Shapes': evaluation.recommendedLevel >= 3 ? 'Strong' : 'Needs Practice',
-            'Fractions': evaluation.recommendedLevel >= 5 ? 'Strong' : 'Needs Practice'
-          },
+          conceptMastery: reasoning.conceptMastery,
           narrative: evaluation.narrative,
           recommendedLevel: evaluation.recommendedLevel,
           recommendedSubLevel: subLevel,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          reasoning,
         };
 
         db.evaluationReports.push(report);
@@ -638,16 +823,27 @@ export function setupFetchInterceptor() {
 
         db.answerSubmissions.push(submission);
 
+        const reasoning = buildMockReasoning(
+          student.name,
+          evaluation.score,
+          studentQuestions.length,
+          evaluation.recommendedLevel,
+          student.currentSubLevel,
+          studentQuestions,
+          answers
+        );
+
         const report: EvaluationReport = {
           id: 'rep_' + student.id + '_' + Date.now(),
           studentId,
           worksheetId,
           score: evaluation.score,
           totalQuestions: studentQuestions.length,
-          conceptMastery: evaluation.conceptMastery,
+          conceptMastery: reasoning.conceptMastery,
           narrative: evaluation.narrative,
           recommendedLevel: evaluation.recommendedLevel,
-          timestamp: now.toISOString()
+          timestamp: now.toISOString(),
+          reasoning,
         };
 
         db.evaluationReports.push(report);

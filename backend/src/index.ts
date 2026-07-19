@@ -4,6 +4,8 @@ import { dbStore, UserRole, User, Student, School, Question, Worksheet, AnswerSu
 import { generateAIDiagnostic, evaluateAIDiagnostic, generateAIPersonalizedWorksheet, evaluateAIWorksheet } from './gemini';
 import { generateDiagnosticPaper } from './paperGenerator';
 import { generateQuestionsForLevel } from './levelGenerator';
+import { buildEvaluationReasoning } from './reasoning';
+import { preloadAllCurriculumLevels, curriculumCacheStats } from './curriculumLoader';
 import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
 import fs from 'fs';
@@ -22,6 +24,20 @@ const WORKSHEET_ASSETS_DIR =
 async function startServer() {
   // Initialize file-based DB
   await dbStore.init();
+
+  // Pre-warm the FLN Levels Structure curriculum cache so the synchronous
+  // reasoning builder (`buildCurriculumSummary`) can always read from
+  // memory. Failures are logged but do not block startup; reasoning then
+  // gracefully degrades to "no curriculum summary".
+  try {
+    await preloadAllCurriculumLevels();
+    const stats = curriculumCacheStats();
+    console.log(
+      `[curriculum] preloaded ${stats.size} levels from ${stats.root ?? '<unknown>'}`
+    );
+  } catch (e) {
+    console.warn('[curriculum] preload failed; reasoning will degrade:', e);
+  }
 
   const app = express();
   app.use(express.json());
@@ -550,6 +566,8 @@ async function startServer() {
     let score = 0;
     let recommendedLevel = 1;
     let narrative = '';
+    let evaluationData: any = null;
+    let personalizedSummary: { failedQuestionsReused: number; newLevelQuestionsAdded: number; targetPhrase: string | null; targetClass: number | null } | null = null;
 
     try {
       const { execSync } = await import('child_process');
@@ -575,11 +593,54 @@ async function startServer() {
       const evalReportPath = path.join(pipelineDir, 'evaluation_reports', `class_${classNumber}`, 'phrase_1', 'evaluation', `${student.id}_evaluation_${dateStr}.json`);
       const reportTxtPath = path.join(pipelineDir, 'evaluation_reports', `class_${classNumber}`, 'phrase_1', 'reports', `${student.id}_report_${dateStr}.txt`);
 
+      // Best-effort: locate a personalized exam the Python pipeline may have produced,
+      // so we can surface WHY the next worksheet is built a certain way.
+      try {
+        const personalizedRoot = path.join(pipelineDir, 'personalized_evaluation', `class_${classNumber}`, student.id);
+        if (fs.existsSync(personalizedRoot)) {
+          // Pick the most recently written target folder/file deterministically (lexical sort).
+          const targetFolders = fs.readdirSync(personalizedRoot).sort();
+          if (targetFolders.length > 0) {
+            const targetFolder = targetFolders[targetFolders.length - 1];
+            // Extract target phrase (e.g. "phrase_2") when present; fall back
+            // to the last underscore-separated segment for legacy/unknown
+            // folder names. Both `class_2_phrase_2` and `class_2` are
+            // handled.
+            const phraseMatch = targetFolder.match(/phrase_(\w+)\b/);
+            const lastSegment = targetFolder.split('_').slice(-1)[0];
+            const targetPhrase = phraseMatch ? phraseMatch[1] : (lastSegment || null);
+            const examFile = path.join(personalizedRoot, targetFolder, `${student.id}_${targetPhrase}_personalized_exam.json`);
+            // Match `class_<N>` regardless of what (if anything) follows.
+            // Uses a word boundary so both `class_3` and `class_3_phrase_2`
+            // are recognised.
+            const targetClassMatch = targetFolder.match(/class_(\d+)\b/);
+            const targetClass = targetClassMatch ? parseInt(targetClassMatch[1], 10) : null;
+            if (fs.existsSync(examFile)) {
+              const examData = JSON.parse(fs.readFileSync(examFile, 'utf-8'));
+              const failedReused = Array.isArray(examData.questions)
+                ? examData.questions.filter((q: any) => typeof q.question_id === 'string' && /rep_/i.test(q.question_id || '')).length
+                : 0;
+              const newAdded = typeof examData.total_questions === 'number'
+                ? Math.max(0, examData.total_questions - failedReused)
+                : 0;
+              personalizedSummary = {
+                failedQuestionsReused: failedReused,
+                newLevelQuestionsAdded: newAdded,
+                targetPhrase,
+                targetClass,
+              };
+            }
+          }
+        }
+      } catch (pErr) {
+        console.warn('Failed to surface personalized exam summary:', pErr);
+      }
+
       if (fs.existsSync(evalReportPath)) {
-        const evalData = JSON.parse(fs.readFileSync(evalReportPath, 'utf-8'));
-        score = evalData.total_questions - (evalData.wrong_count || 0);
-        
-        const levelStr = String(evalData.demonstrated_level || '1');
+        evaluationData = JSON.parse(fs.readFileSync(evalReportPath, 'utf-8'));
+        score = (evaluationData.total_questions ?? 0) - (evaluationData.wrong_count ?? 0);
+
+        const levelStr = String(evaluationData.demonstrated_level || '1');
         const lvlMatch = levelStr.match(/\d+/);
         if (lvlMatch) {
           const matchedNum = parseInt(lvlMatch[0], 10);
@@ -642,27 +703,17 @@ async function startServer() {
       levelHistory
     });
 
-    // Create a special Evaluation Report with dynamic mock concept mastery
-    const conceptMastery: { [key: string]: string } = {
-      'Number Sense': recommendedLevel >= 15 ? 'Strong' : 'Needs Practice',
-      'Shapes': recommendedLevel >= 25 ? 'Strong' : 'Needs Practice',
-      'Fractions': recommendedLevel >= 35 ? 'Strong' : 'Needs Practice',
-      'Operations': recommendedLevel >= 12 ? 'Strong' : 'Needs Practice'
-    };
-
-    try {
-      const evalReportPath = path.join(pipelineDir, 'evaluation_reports', `class_${classNumber}`, 'phrase_1', 'evaluation', `${student.id}_evaluation_${dateStr}.json`);
-      if (fs.existsSync(evalReportPath)) {
-        const evalData = JSON.parse(fs.readFileSync(evalReportPath, 'utf-8'));
-        if (evalData.topics_to_focus && Array.isArray(evalData.topics_to_focus)) {
-          evalData.topics_to_focus.forEach((t: string) => {
-            conceptMastery[t] = 'Needs Practice';
-          });
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to parse dynamic concept mastery:', e);
-    }
+    const reasoning = buildEvaluationReasoning({
+      studentName: student.name,
+      score,
+      totalQuestions: questions.length,
+      recommendedLevel,
+      recommendedSubLevel: subLevel,
+      questions,
+      answers,
+      aiEvaluation: evaluationData || null,
+      personalized: personalizedSummary || null,
+    });
 
     const report: EvaluationReport = {
       id: 'rep_diag_' + Date.now(),
@@ -670,11 +721,12 @@ async function startServer() {
       worksheetId: 'diagnostic',
       score,
       totalQuestions: questions.length,
-      conceptMastery,
+      conceptMastery: reasoning.conceptMastery,
       narrative,
       recommendedLevel,
       recommendedSubLevel: subLevel,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      reasoning,
     };
 
     await dbStore.addEvaluationReport(report);
@@ -1115,17 +1167,28 @@ async function startServer() {
     await dbStore.addAnswerSubmission(submission);
 
     // Save Evaluation Report
+    const reasoning = buildEvaluationReasoning({
+      studentName: student.name,
+      score: evaluation.score,
+      totalQuestions: studentQuestions.length,
+      recommendedLevel: evaluation.recommendedLevel,
+      recommendedSubLevel: newSubLevel,
+      questions: studentQuestions,
+      answers,
+    });
+
     const report: EvaluationReport = {
       id: 'rep_' + student.id + '_' + Date.now(),
       studentId,
       worksheetId,
       score: evaluation.score,
       totalQuestions: studentQuestions.length,
-      conceptMastery: evaluation.conceptMastery,
+      conceptMastery: reasoning.conceptMastery,
       narrative: evaluation.narrative,
       recommendedLevel: evaluation.recommendedLevel,
       recommendedSubLevel: newSubLevel,
-      timestamp: now.toISOString()
+      timestamp: now.toISOString(),
+      reasoning,
     };
 
     await dbStore.addEvaluationReport(report);

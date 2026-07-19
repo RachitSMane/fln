@@ -120,6 +120,82 @@ export interface AnswerSubmission {
   answers: { [questionId: string]: string }; // Q1 -> A, Q2 -> 5, etc.
 }
 
+export type ConfidenceLevel = 'Very High' | 'High' | 'Moderate' | 'Low';
+
+export interface EvaluationReasoning {
+  explanation: {
+    headline: string;
+    narrative: string;
+  };
+  conceptMastery: { [topic: string]: 'Strong' | 'Needs Practice' | 'Satisfactory' };
+  confidence?: {
+    // 0..1 (numeric score). When the AI evaluation pipeline already
+    // produces its own confidence_score we surface it verbatim; otherwise
+    // we derive it deterministically from accuracy.
+    score: number;
+    level: ConfidenceLevel;
+    explanation: string;
+  };
+  learningProgression: {
+    currentLevel: number;
+    currentLevelName: string;
+    currentStrand: string;
+    nextMilestone: {
+      level: number;
+      name: string;
+      strand: string;
+    } | null;
+    blockers: { topic: string; questionId?: string; errorType?: string }[];
+    recommendations: string[];
+  };
+  // Phase 2: evidence-driven fields. Derived deterministically from the
+  // existing question/answer evidence and (when available) the AI evaluation
+  // pipeline outputs and the personalized evaluation pipeline summary.
+  evidence?: {
+    assessedTopics: string[];
+    strongestConcepts: string[];
+    weakestConcepts: string[];
+    failedQuestionSummary: {
+      total: number;
+      byLevel: { level: number; name: string | null; count: number; pipelineReported?: boolean }[];
+      byTopic: { topic: string; count: number }[];
+    };
+    difficultyBreakdown?: {
+      easy: { correct: number; attempted: number };
+      medium: { correct: number; attempted: number };
+      hard: { correct: number; attempted: number };
+    };
+    conceptMastery: { [topic: string]: 'Strong' | 'Needs Practice' | 'Satisfactory' };
+  };
+  remediation?: {
+    reusedFailedQuestions: number;
+    newlyIntroducedCurriculum: number;
+    remediationReason: string;
+    targetClass: number | null;
+    targetPhrase: string | null;
+  };
+  // Phase 3: curriculum-aware teaching summary. All fields are surfaced
+  // from the existing FLN Levels Structure via the curriculum loader
+  // (backend/src/curriculumLoader.ts) — we never invent content here.
+  curriculumSummary?: {
+    currentLevelName: string;
+    currentObjective: string;
+    currentLearningOutcome: string[];
+    currentTopics: string[];
+    nextLevelName: string | null;
+    nextObjective: string | null;
+    transitionReason: string;
+  };
+  // Kept for backward compatibility with Phase 1 consumers.
+  personalized?: {
+    failedQuestionsReused: number;
+    newLevelQuestionsAdded: number;
+    targetPhrase: string | null;
+    targetClass: number | null;
+    rationale: string;
+  };
+}
+
 export interface EvaluationReport {
   id: string;
   studentId: string;
@@ -127,10 +203,13 @@ export interface EvaluationReport {
   score: number;
   totalQuestions: number;
   conceptMastery: { [topic: string]: 'Strong' | 'Needs Practice' | 'Satisfactory' };
-  narrative: string; // Narrative summary for parent/teacher
+  narrative: string; // Narrative summary for parent/teacher (fallback)
   recommendedLevel: number;
   recommendedSubLevel?: number;
   timestamp: string;
+  // Optional structured reasoning (Phase 1: Learning Progression Intelligence).
+  // When absent, the frontend falls back to the legacy `narrative` string.
+  reasoning?: EvaluationReasoning;
 }
 
 export interface Ticket {

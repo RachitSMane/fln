@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Student, ClassGroup, Question, EvaluationReport, User } from '../types';
+import { ReasoningSection } from './EducationalReasoning';
 
 interface IcrScannerProps {
   token: string;
@@ -555,6 +556,12 @@ export const IcrScanner: React.FC<IcrScannerProps> = ({ token, user, onBack }) =
                 ))}
               </div>
             </div>
+
+            {/* Phase 1: Educational Reasoning */}
+            <ReasoningSection
+              report={report}
+              title="Educational Reasoning — Learning Progression"
+            />
 
             <div className="bg-zinc-50 p-5 rounded-xl border border-zinc-200 space-y-1">
               <h4 className="text-[9px] font-mono font-bold uppercase text-zinc-400 tracking-wider">AI Narrative Summary</h4>

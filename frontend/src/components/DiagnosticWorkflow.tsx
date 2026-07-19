@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Student, Question, EvaluationReport } from '../types';
 import { SvgLibraryResolver } from './SvgLibraryResolver';
+import { ReasoningSection } from './EducationalReasoning';
 
 interface DiagnosticWorkflowProps {
   student: Student;
@@ -296,6 +297,9 @@ export const DiagnosticWorkflow: React.FC<DiagnosticWorkflowProps> = ({ student,
               <span className="text-2xl font-display font-bold text-zinc-900">Level {Math.min(59, report.recommendedLevel + 1)}</span>
             </div>
           </div>
+
+          {/* Phase 1: Educational Reasoning (between Placed Level and AI Narrative) */}
+          <ReasoningSection report={report} title="Educational Reasoning — Learning Progression" />
 
           <div className="space-y-2 bg-white p-5 border border-zinc-150 rounded-xl shadow-inner">
             <h4 className="text-xs font-mono font-bold uppercase text-zinc-400">AI Narrative Feedback Summary</h4>
